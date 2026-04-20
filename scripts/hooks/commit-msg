@@ -1,0 +1,13 @@
+#!/bin/sh
+# Require commit messages to reference an AIMESH ticket, e.g. "AIMESH-9: ..."
+
+commit_msg=$(cat "$1")
+pattern="^AIMESH-[0-9]+:"
+
+if ! echo "$commit_msg" | grep -qE "$pattern"; then
+  echo ""
+  echo "  ERROR: Commit message must start with a ticket number, e.g.:"
+  echo "  AIMESH-9: add device registry service"
+  echo ""
+  exit 1
+fi
