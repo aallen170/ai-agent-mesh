@@ -208,3 +208,6 @@ __marimo__/
 
 # AIMESH
 device_config.yaml
+
+# Ignore logs
+logs/
