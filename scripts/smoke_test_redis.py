@@ -5,7 +5,7 @@ Verifies that Redis Streams + Pub/Sub are working correctly.
 
 Usage:
     # Start Redis first:
-    #   cd infra && docker compose up -d
+    #   docker compose -f infra/docker-compose.yml up -d
     #
     # Then run this from the repo root:
     #   python scripts/smoke_test_redis.py
