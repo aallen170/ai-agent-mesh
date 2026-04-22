@@ -42,3 +42,8 @@ jobs:
         run: python scripts/smoke_test_registry.py
         env:
           REDIS_URL: redis://localhost:6379/0
+
+      - name: Smoke test — Task router (AIMESH-10)
+        run: python scripts/smoke_test_router.py
+        env:
+          REDIS_URL: redis://localhost:6379/0
