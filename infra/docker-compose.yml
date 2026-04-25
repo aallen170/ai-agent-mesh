@@ -17,6 +17,32 @@ services:
       timeout: 5s
       retries: 5
 
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    container_name: aimesh-litellm
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./litellm_config.yaml:/app/config.yaml:ro
+    command: --config /app/config.yaml --port 4000 --num_workers 2
+    environment:
+      # Required for local dev — override in production via real secrets
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:-sk-aimesh-local}
+      # Model provider keys — leave blank if that tier isn't in use locally
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - RUNPOD_API_KEY=${RUNPOD_API_KEY:-}
+      - RUNPOD_ENDPOINT_ID=${RUNPOD_ENDPOINT_ID:-}
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:4000/health/liveliness"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
 volumes:
   redis-data:
     driver: local
