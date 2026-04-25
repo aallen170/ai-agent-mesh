@@ -47,3 +47,8 @@ jobs:
         run: python scripts/smoke_test_router.py
         env:
           REDIS_URL: redis://localhost:6379/0
+
+      - name: Smoke test — LiteLLM gateway config + client (AIMESH-11)
+        # Tests config parsing and GatewayClient construction only.
+        # The live health/model checks are skipped when LITELLM_BASE_URL is unset.
+        run: python scripts/smoke_test_gateway.py
