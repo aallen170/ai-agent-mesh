@@ -1,0 +1,71 @@
+# device_config.example.yaml — AIMESH worker device configuration template
+#
+# Copy this file to your device, rename it (e.g. gaming_laptop.yaml), fill in
+# the values for your hardware, and start the worker:
+#
+#   python scripts/run_worker.py --config config/gaming_laptop.yaml
+#
+# Environment variable overrides (useful to avoid storing URLs in files):
+#   REDIS_URL          — overrides redis_url below
+#   LITELLM_BASE_URL   — overrides litellm_url below
+#   LITELLM_MASTER_KEY — auth key for the gateway (default: sk-aimesh-local)
+
+# ---------------------------------------------------------------------------
+# Identity
+# ---------------------------------------------------------------------------
+
+# Stable unique identifier for this device. Used as the consumer name in Redis
+# streams and the key in the device registry. Use a hostname or short slug.
+# Must be unique across all devices in the mesh.
+device_id: gaming-laptop
+
+# Human-readable display name shown in the registry and logs.
+name: "Gaming Laptop"
+
+# ---------------------------------------------------------------------------
+# Tier
+# ---------------------------------------------------------------------------
+# 0 = phones / tablets (MLX / MLC inference)
+# 1 = iGPU laptop (Ollama)
+# 2 = dGPU laptop or desktop (Ollama)
+# 3 = RunPod serverless
+# 4 = Claude (Anthropic API) — cloud tier, no worker needed
+tier: 2
+
+# ---------------------------------------------------------------------------
+# Connections
+# ---------------------------------------------------------------------------
+
+# Redis URL for the control-plane instance (running on the desktop PC).
+redis_url: redis://desktop.local:6379/0
+
+# LiteLLM gateway URL. All inference goes through this endpoint.
+# Typically the control-plane desktop running docker compose up.
+litellm_url: http://desktop.local:4000/v1
+
+# ---------------------------------------------------------------------------
+# Models
+# ---------------------------------------------------------------------------
+# LiteLLM model names available on this device, as defined in
+# infra/litellm_config.yaml.  The first entry is the default used when a
+# task doesn't specify a model explicitly.
+models:
+  - tier2/mixtral-8x7b-laptop      # primary — larger, better quality
+  - tier2/llama3.1-70b-desktop     # fallback via desktop if needed
+
+# ---------------------------------------------------------------------------
+# Heartbeat
+# ---------------------------------------------------------------------------
+# How often (seconds) this worker sends a heartbeat to the control-plane
+# registry to confirm it's still online.
+heartbeat_interval: 10.0
+
+# ---------------------------------------------------------------------------
+# Hardware (used for registry / observability — does not affect routing)
+# ---------------------------------------------------------------------------
+hardware:
+  ram_gb: 32.0
+  vram_gb: 12.0
+  gpu_name: "NVIDIA RTX 3080"
+  cpu_cores: 16
+  os: "Windows 11"

@@ -52,3 +52,8 @@ jobs:
         # Tests config parsing and GatewayClient construction only.
         # The live health/model checks are skipped when LITELLM_BASE_URL is unset.
         run: python scripts/smoke_test_gateway.py
+
+      - name: Smoke test — GatewayWorker (AIMESH-15)
+        # Tests DeviceConfig loading, worker construction, and mocked task processing.
+        # No live Redis or gateway required.
+        run: python scripts/smoke_test_worker.py

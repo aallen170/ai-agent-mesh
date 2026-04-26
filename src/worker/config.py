@@ -38,6 +38,7 @@ except ImportError:
 
 
 _DEFAULT_REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+_DEFAULT_LITELLM_URL = os.getenv("LITELLM_BASE_URL", "http://localhost:4000/v1")
 
 
 @dataclass
@@ -51,8 +52,11 @@ class DeviceConfig:
     name                Human-readable label shown in the registry.
     tier                Compute tier (0–4).
     redis_url           Connection string for the control-plane Redis instance.
+    litellm_url         Base URL of the LiteLLM gateway (default: LITELLM_BASE_URL
+                        env var, falling back to http://localhost:4000/v1).
     heartbeat_interval  Seconds between heartbeat publishes (default 10).
-    model_ids           Models available on this device (e.g. ["llama3:8b"]).
+    model_ids           Models available on this device (LiteLLM names,
+                        e.g. ["tier2/llama3.1-70b-desktop"]).
     ram_gb              Total system RAM in gigabytes.
     vram_gb             GPU VRAM in gigabytes (0 if no discrete GPU).
     gpu_name            GPU model string, e.g. "NVIDIA RTX 3080".
@@ -64,6 +68,7 @@ class DeviceConfig:
     name: str
     tier: int
     redis_url: str = _DEFAULT_REDIS_URL
+    litellm_url: str = _DEFAULT_LITELLM_URL
     heartbeat_interval: float = 10.0
     model_ids: list[str] = field(default_factory=list)
     ram_gb: float = 0.0
@@ -106,6 +111,7 @@ class DeviceConfig:
             name=raw.get("name", raw["device_id"]),
             tier=int(raw["tier"]),
             redis_url=raw.get("redis_url", _DEFAULT_REDIS_URL),
+            litellm_url=raw.get("litellm_url", _DEFAULT_LITELLM_URL),
             heartbeat_interval=float(raw.get("heartbeat_interval", 10.0)),
             model_ids=models,
             ram_gb=float(hardware.get("ram_gb", 0)),
@@ -129,6 +135,7 @@ class DeviceConfig:
             f"name: {self.name!r}\n"
             f"tier: {self.tier}\n"
             f"redis_url: {self.redis_url}\n"
+            f"litellm_url: {self.litellm_url}\n"
             f"heartbeat_interval: {self.heartbeat_interval}\n"
             f"\nmodels:\n"
             + "".join(f"  - {m}\n" for m in self.model_ids)
