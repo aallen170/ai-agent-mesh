@@ -4,20 +4,24 @@ router.py — TaskRouter: the AIMESH control-plane task dispatcher.
 Responsibilities
 ----------------
 1. Accept a TaskRequest (tier + task_type + payload).
-2. Write a TaskRecord to Redis so the task's lifecycle is tracked.
-3. Enqueue the task to the correct tier stream via StreamsClient.
-4. Update the record's status as the task moves through its lifecycle.
-5. Receive results from workers and mark tasks completed or failed.
-6. List tasks by status for monitoring / the LangGraph orchestrator.
+2. Resolve the compute tier — via TaskClassifier (AIMESH-12) if tier is None.
+3. Write a TaskRecord to Redis so the task's lifecycle is tracked.
+4. Enqueue the task to the correct tier stream via StreamsClient.
+5. Update the record's status as the task moves through its lifecycle.
+6. Receive results from workers and mark tasks completed or failed.
+7. List tasks by status for monitoring / the LangGraph orchestrator.
 
 Redis key layout
 ----------------
 aimesh:task:{task_id}   Hash  — one TaskRecord per task
 aimesh:tasks:index      Set   — all task_ids ever submitted (for enumeration)
 
-Note: tier-based classification (choosing *which* tier to route to) is
-handled by the caller for now.  AIMESH-12 will add a classifier that
-auto-assigns tiers from task content.
+Auto-classification (AIMESH-12)
+--------------------------------
+Pass a TaskClassifier to the constructor and leave TaskRequest.tier as None
+to have the classifier pick the appropriate tier automatically.  If the
+classifier is not configured, or its model call fails, the router defaults
+to FALLBACK_TIER (2) and logs a warning.
 
 Thread safety
 -------------
@@ -26,9 +30,10 @@ pool so concurrent calls from multiple threads are safe.
 """
 from __future__ import annotations
 
+import json
 import logging
 import time
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import redis
 
@@ -36,11 +41,17 @@ from ..redis.client import RedisClient
 from ..redis.streams import StreamsClient
 from .task import TaskRecord, TaskRequest, TaskStatus
 
+if TYPE_CHECKING:
+    from ..classifier.classifier import TaskClassifier
+
 logger = logging.getLogger(__name__)
 
 # Redis key templates
 _TASK_KEY = "aimesh:task:{task_id}"
 _TASKS_INDEX = "aimesh:tasks:index"
+
+# Tier used when the classifier is absent or fails
+_FALLBACK_TIER = 2
 
 
 class TaskRouter:
@@ -51,15 +62,21 @@ class TaskRouter:
     ----------
     redis_client    Shared RedisClient (connection pool is thread-safe).
     streams_client  StreamsClient used to enqueue tasks to the tier streams.
+    classifier      Optional TaskClassifier (AIMESH-12).  When supplied,
+                    tasks submitted with ``tier=None`` are automatically
+                    classified before dispatch.  If absent, tier-less tasks
+                    fall back to tier 2.
     """
 
     def __init__(
         self,
         redis_client: RedisClient,
         streams_client: StreamsClient,
+        classifier: "TaskClassifier | None" = None,
     ) -> None:
         self._r = redis_client.r
         self._streams = streams_client
+        self._classifier = classifier
 
     # ------------------------------------------------------------------
     # 1. Submit
@@ -69,6 +86,7 @@ class TaskRouter:
         """
         Submit a task to the mesh.
 
+        If ``request.tier`` is None, the classifier resolves the tier first.
         Creates a TaskRecord in Redis, enqueues the task to the appropriate
         tier stream, then updates the record to DISPATCHED.
 
@@ -76,13 +94,15 @@ class TaskRouter:
 
         Raises
         ------
-        ValueError  If the tier is invalid.
+        ValueError  If the resolved tier is invalid.
         redis.RedisError  If the Redis write fails.
         """
+        tier = self._resolve_tier(request)
+
         record = TaskRecord(
             task_id=request.task_id,
             task_type=request.task_type,
-            tier=request.tier,
+            tier=tier,
             status=TaskStatus.PENDING,
             enqueued_at=time.time(),
         )
@@ -96,7 +116,7 @@ class TaskRouter:
 
         # Write to the Redis stream — this is what the worker consumes
         self._streams.enqueue_task(
-            tier=request.tier,
+            tier=tier,
             task_type=request.task_type,
             payload=request.payload,
             task_id=request.task_id,
@@ -249,6 +269,45 @@ class TaskRouter:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _resolve_tier(self, request: TaskRequest) -> int:
+        """
+        Return the compute tier for *request*.
+
+        If ``request.tier`` is set, return it directly.
+        Otherwise, ask the classifier.  If the classifier is not configured
+        or fails, fall back to ``_FALLBACK_TIER`` with a warning.
+        """
+        if request.tier is not None:
+            return request.tier
+
+        if self._classifier is not None:
+            # Extract a human-readable prompt from the payload for classification.
+            # The "prompt" key is the canonical field; fall back to a JSON dump.
+            prompt_text = request.payload.get("prompt") or json.dumps(request.payload)
+            result = self._classifier.classify(
+                prompt=str(prompt_text),
+                task_type=request.task_type,
+            )
+            if result.fallback:
+                logger.warning(
+                    "Classifier returned fallback tier %d for task %s: %s",
+                    result.tier, request.task_id, result.reasoning,
+                )
+            else:
+                logger.info(
+                    "Classifier assigned tier %d for task %s (%.0fms): %s",
+                    result.tier, request.task_id, result.elapsed_ms, result.reasoning,
+                )
+            return result.tier
+
+        # No classifier configured at all
+        logger.warning(
+            "No tier specified and no classifier configured for task %s — "
+            "defaulting to tier %d",
+            request.task_id, _FALLBACK_TIER,
+        )
+        return _FALLBACK_TIER
 
     def _save(self, record: TaskRecord) -> None:
         """Write (or overwrite) a TaskRecord to Redis atomically."""

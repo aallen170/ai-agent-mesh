@@ -110,9 +110,17 @@ class PubSubClient:
     # ------------------------------------------------------------------
 
     def stop(self) -> None:
-        """Unsubscribe and stop the background listener thread."""
+        """
+        Unsubscribe and stop the background listener thread.
+
+        Calls ``join()`` after signalling the thread to stop so that the
+        underlying Redis connection is not closed while the thread is still
+        mid-read (which would cause ``OSError: Bad file descriptor`` and a
+        noisy crash at interpreter shutdown).
+        """
         if self._thread:
             self._thread.stop()
+            self._thread.join(timeout=2.0)
             self._thread = None
         if self._pubsub:
             self._pubsub.close()

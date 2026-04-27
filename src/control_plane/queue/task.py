@@ -46,15 +46,16 @@ class TaskRequest:
     task_type   Application-defined label for the kind of work
                 (e.g. "llm_inference", "embedding", "summarise").
     payload     Arbitrary dict passed through to the worker unchanged.
-    tier        Which compute tier should handle this task (0–4).
-                The caller is responsible for choosing the right tier.
-                Tier-based auto-classification will be added in AIMESH-12.
+    tier        Which compute tier should handle this task (0–4), or None to
+                let the TaskClassifier (AIMESH-12) auto-select the tier.
+                If no classifier is configured on the router, None falls back
+                to tier 2 (dGPU desktop).
     task_id     Optional stable ID.  Auto-generated (UUID4) if not provided.
                 Pass an explicit ID to make re-submissions idempotent.
     """
     task_type: str
     payload: dict[str, Any]
-    tier: int
+    tier: int | None = None
     task_id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
 
