@@ -61,6 +61,12 @@ model_list:
   # Two devices: desktop PC and gaming laptop (separate Ollama instances).
   # ---------------------------------------------------------------------------
 
+  # Small fast model used by the control-plane task classifier (AIMESH-12).
+  - model_name: tier2/llama3.2-3b-desktop
+    litellm_params:
+      model: ollama/llama3.2:3b                               # pull with: ollama pull llama3.2:3b
+      api_base: "http://desktop-pc.local:11434"              # TODO: replace with real hostname/IP
+
   - model_name: tier2/llama3.1-70b-desktop
     litellm_params:
       model: ollama/llama3.1:70b                              # TODO: confirm pulled model tag

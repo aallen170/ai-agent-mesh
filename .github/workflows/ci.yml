@@ -57,3 +57,8 @@ jobs:
         # Tests DeviceConfig loading, worker construction, and mocked task processing.
         # No live Redis or gateway required.
         run: python scripts/smoke_test_worker.py
+
+      - name: Smoke test — Task classifier (AIMESH-12)
+        # Tests prompt building, JSON parsing, classifier fallback, and
+        # auto-classify integration with TaskRouter. No live Redis or gateway required.
+        run: python scripts/smoke_test_classifier.py
