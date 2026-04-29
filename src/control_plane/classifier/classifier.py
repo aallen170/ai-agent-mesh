@@ -32,10 +32,33 @@ import logging
 import time
 from dataclasses import dataclass, field
 
+from opentelemetry import trace
+
+from ...telemetry import get_meter, get_tracer
 from ..gateway.client import GatewayClient
 from .prompt import build_messages, parse_response
 
 logger = logging.getLogger(__name__)
+
+_tracer = get_tracer(__name__)
+_meter = get_meter(__name__)
+
+# Metrics
+_classify_counter = _meter.create_counter(
+    "aimesh.classifier.calls",
+    unit="1",
+    description="Total classifier invocations",
+)
+_classify_duration = _meter.create_histogram(
+    "aimesh.classifier.duration",
+    unit="ms",
+    description="Wall-clock time of the classifier model call in milliseconds",
+)
+_tier_counter = _meter.create_counter(
+    "aimesh.classifier.tier_assigned",
+    unit="1",
+    description="Tiers assigned by the classifier",
+)
 
 # Model registered in infra/litellm_config.yaml (AIMESH-12).
 # Small and fast — intended for low-latency classification at ingestion time.
@@ -125,41 +148,70 @@ class TaskClassifier:
         """
         messages = build_messages(prompt=prompt, task_type=task_type)
 
-        t0 = time.monotonic()
-        try:
-            response = self._client.complete(
-                model=self.model,
-                messages=messages,
-                temperature=self._temperature,
-                max_tokens=self._max_tokens,
-            )
-            elapsed_ms = (time.monotonic() - t0) * 1000
+        with _tracer.start_as_current_span(
+            "aimesh.classifier.classify",
+            attributes={
+                "classifier.model": self.model,
+                "task.type": task_type or "unknown",
+            },
+        ) as span:
+            t0 = time.monotonic()
+            try:
+                response = self._client.complete(
+                    model=self.model,
+                    messages=messages,
+                    temperature=self._temperature,
+                    max_tokens=self._max_tokens,
+                )
+                elapsed_ms = (time.monotonic() - t0) * 1000
 
-            raw_text = response.choices[0].message.content or ""
-            tier, reasoning = parse_response(raw_text)
+                raw_text = response.choices[0].message.content or ""
+                tier, reasoning = parse_response(raw_text)
 
-            logger.debug(
-                "Classified as tier-%d in %.0fms (model=%s): %s",
-                tier, elapsed_ms, self.model, reasoning,
-            )
-            return ClassificationResult(
-                tier=tier,
-                reasoning=reasoning,
-                model=self.model,
-                elapsed_ms=elapsed_ms,
-                fallback=False,
-            )
+                span.set_attributes({
+                    "classifier.tier": tier,
+                    "classifier.fallback": False,
+                    "classifier.elapsed_ms": elapsed_ms,
+                })
 
-        except Exception as exc:
-            elapsed_ms = (time.monotonic() - t0) * 1000
-            logger.warning(
-                "Classifier failed (model=%s, %.0fms) — defaulting to tier %d. Error: %s",
-                self.model, elapsed_ms, self.fallback_tier, exc,
-            )
-            return ClassificationResult(
-                tier=self.fallback_tier,
-                reasoning=f"Classifier unavailable — defaulted to tier {self.fallback_tier}.",
-                model=self.model,
-                elapsed_ms=elapsed_ms,
-                fallback=True,
-            )
+                _classify_counter.add(1, {"model": self.model, "fallback": "false"})
+                _classify_duration.record(elapsed_ms, {"model": self.model})
+                _tier_counter.add(1, {"tier": str(tier), "fallback": "false"})
+
+                logger.debug(
+                    "Classified as tier-%d in %.0fms (model=%s): %s",
+                    tier, elapsed_ms, self.model, reasoning,
+                )
+                return ClassificationResult(
+                    tier=tier,
+                    reasoning=reasoning,
+                    model=self.model,
+                    elapsed_ms=elapsed_ms,
+                    fallback=False,
+                )
+
+            except Exception as exc:
+                elapsed_ms = (time.monotonic() - t0) * 1000
+                span.set_attributes({
+                    "classifier.tier": self.fallback_tier,
+                    "classifier.fallback": True,
+                    "classifier.elapsed_ms": elapsed_ms,
+                })
+                span.record_exception(exc)
+                span.set_status(trace.StatusCode.ERROR, str(exc))
+
+                _classify_counter.add(1, {"model": self.model, "fallback": "true"})
+                _classify_duration.record(elapsed_ms, {"model": self.model})
+                _tier_counter.add(1, {"tier": str(self.fallback_tier), "fallback": "true"})
+
+                logger.warning(
+                    "Classifier failed (model=%s, %.0fms) — defaulting to tier %d. Error: %s",
+                    self.model, elapsed_ms, self.fallback_tier, exc,
+                )
+                return ClassificationResult(
+                    tier=self.fallback_tier,
+                    reasoning=f"Classifier unavailable — defaulted to tier {self.fallback_tier}.",
+                    model=self.model,
+                    elapsed_ms=elapsed_ms,
+                    fallback=True,
+                )

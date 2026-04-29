@@ -1,0 +1,270 @@
+{
+  "title": "AIMESH — Agent Mesh Overview",
+  "uid": "aimesh-overview",
+  "version": 1,
+  "schemaVersion": 39,
+  "refresh": "15s",
+  "time": { "from": "now-1h", "to": "now" },
+  "timezone": "browser",
+  "tags": ["aimesh"],
+  "templating": { "list": [] },
+  "annotations": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Task Throughput — submitted vs completed (rate/min)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqpm",
+          "custom": { "lineWidth": 2 }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "failed" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "sum(rate(aimesh_aimesh_tasks_submitted_total[1m])) * 60",
+          "legendFormat": "submitted"
+        },
+        {
+          "datasource": "Prometheus",
+          "expr": "sum(rate(aimesh_aimesh_tasks_completed_total{status=\"completed\"}[1m])) * 60",
+          "legendFormat": "completed"
+        },
+        {
+          "datasource": "Prometheus",
+          "expr": "sum(rate(aimesh_aimesh_tasks_completed_total{status=\"failed\"}[1m])) * 60",
+          "legendFormat": "failed"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Task Error Rate (%)",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 5 },
+              { "color": "red", "value": 20 }
+            ]
+          },
+          "custom": { "lineWidth": 2 }
+        }
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "single" }
+      },
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "100 * sum(rate(aimesh_aimesh_tasks_completed_total{status=\"failed\"}[5m])) / (sum(rate(aimesh_aimesh_tasks_completed_total[5m])) > 0)",
+          "legendFormat": "error rate (5m)"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Tasks Submitted by Tier (rate/min)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "fieldConfig": {
+        "defaults": { "unit": "reqpm", "custom": { "lineWidth": 2 } }
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "sum by (tier) (rate(aimesh_aimesh_tasks_submitted_total[1m])) * 60",
+          "legendFormat": "tier {{tier}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Tier Distribution (total submitted)",
+      "type": "piechart",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "options": {
+        "pieType": "donut",
+        "legend": { "displayMode": "list", "placement": "right" },
+        "tooltip": { "mode": "single" }
+      },
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "sum by (tier) (aimesh_aimesh_tasks_submitted_total)",
+          "legendFormat": "tier {{tier}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Task End-to-End Duration — p50 / p95 / p99 (seconds)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 16, "w": 12, "h": 8 },
+      "fieldConfig": {
+        "defaults": { "unit": "s", "custom": { "lineWidth": 2 } }
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "histogram_quantile(0.50, sum(rate(aimesh_aimesh_task_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p50"
+        },
+        {
+          "datasource": "Prometheus",
+          "expr": "histogram_quantile(0.95, sum(rate(aimesh_aimesh_task_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p95"
+        },
+        {
+          "datasource": "Prometheus",
+          "expr": "histogram_quantile(0.99, sum(rate(aimesh_aimesh_task_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Worker Task Duration — p95 by Device (seconds)",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 16, "w": 12, "h": 8 },
+      "fieldConfig": {
+        "defaults": { "unit": "s", "custom": { "lineWidth": 2 } }
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "histogram_quantile(0.95, sum by (device_id, le) (rate(aimesh_aimesh_worker_task_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{device_id}}"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Classifier — calls/min and fallback rate",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 24, "w": 12, "h": 8 },
+      "fieldConfig": {
+        "defaults": { "unit": "reqpm", "custom": { "lineWidth": 2 } },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "fallback" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "sum(rate(aimesh_aimesh_classifier_calls_total[1m])) * 60",
+          "legendFormat": "total"
+        },
+        {
+          "datasource": "Prometheus",
+          "expr": "sum(rate(aimesh_aimesh_classifier_calls_total{fallback=\"true\"}[1m])) * 60",
+          "legendFormat": "fallback"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Classifier — p50 / p95 latency (ms)",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 24, "w": 12, "h": 8 },
+      "fieldConfig": {
+        "defaults": { "unit": "ms", "custom": { "lineWidth": 2 } }
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "histogram_quantile(0.50, sum(rate(aimesh_aimesh_classifier_duration_milliseconds_bucket[5m])) by (le))",
+          "legendFormat": "p50"
+        },
+        {
+          "datasource": "Prometheus",
+          "expr": "histogram_quantile(0.95, sum(rate(aimesh_aimesh_classifier_duration_milliseconds_bucket[5m])) by (le))",
+          "legendFormat": "p95"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Classifier — Tier Assigned Distribution",
+      "type": "piechart",
+      "gridPos": { "x": 0, "y": 32, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "options": {
+        "pieType": "donut",
+        "legend": { "displayMode": "list", "placement": "right" },
+        "tooltip": { "mode": "single" }
+      },
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "sum by (tier) (aimesh_aimesh_classifier_tier_assigned_total{fallback=\"false\"})",
+          "legendFormat": "tier {{tier}}"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "title": "Worker Tasks Processed by Device",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 32, "w": 12, "h": 8 },
+      "fieldConfig": {
+        "defaults": { "unit": "reqpm", "custom": { "lineWidth": 2 } }
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi" }
+      },
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "sum by (device_id) (rate(aimesh_aimesh_worker_tasks_processed_total[1m])) * 60",
+          "legendFormat": "{{device_id}}"
+        }
+      ]
+    }
+  ]
+}

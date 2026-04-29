@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING, Optional
 
 import redis
 
+from ...telemetry import get_meter, get_tracer
 from ..redis.client import RedisClient
 from ..redis.streams import StreamsClient
 from .task import TaskRecord, TaskRequest, TaskStatus
@@ -45,6 +46,26 @@ if TYPE_CHECKING:
     from ..classifier.classifier import TaskClassifier
 
 logger = logging.getLogger(__name__)
+
+_tracer = get_tracer(__name__)
+_meter = get_meter(__name__)
+
+# Metrics
+_tasks_submitted = _meter.create_counter(
+    "aimesh.tasks.submitted",
+    unit="1",
+    description="Total tasks submitted to the mesh",
+)
+_tasks_completed = _meter.create_counter(
+    "aimesh.tasks.completed",
+    unit="1",
+    description="Total tasks that reached a terminal state (completed or failed)",
+)
+_task_duration = _meter.create_histogram(
+    "aimesh.task.duration",
+    unit="s",
+    description="End-to-end task duration from enqueue to completion in seconds",
+)
 
 # Redis key templates
 _TASK_KEY = "aimesh:task:{task_id}"
@@ -97,38 +118,50 @@ class TaskRouter:
         ValueError  If the resolved tier is invalid.
         redis.RedisError  If the Redis write fails.
         """
-        tier = self._resolve_tier(request)
+        with _tracer.start_as_current_span(
+            "aimesh.task.submit",
+            attributes={
+                "task.id": request.task_id,
+                "task.type": request.task_type,
+            },
+        ) as span:
+            tier = self._resolve_tier(request)
+            span.set_attribute("task.tier", tier)
 
-        record = TaskRecord(
-            task_id=request.task_id,
-            task_type=request.task_type,
-            tier=tier,
-            status=TaskStatus.PENDING,
-            enqueued_at=time.time(),
-        )
+            record = TaskRecord(
+                task_id=request.task_id,
+                task_type=request.task_type,
+                tier=tier,
+                status=TaskStatus.PENDING,
+                enqueued_at=time.time(),
+            )
 
-        # Persist the PENDING record first so the task is visible immediately
-        self._save(record)
-        logger.info(
-            "Task %s submitted (type=%s, tier=%d)",
-            record.task_id, record.task_type, record.tier,
-        )
+            # Persist the PENDING record first so the task is visible immediately
+            self._save(record)
+            logger.info(
+                "Task %s submitted (type=%s, tier=%d)",
+                record.task_id, record.task_type, record.tier,
+            )
 
-        # Write to the Redis stream — this is what the worker consumes
-        self._streams.enqueue_task(
-            tier=tier,
-            task_type=request.task_type,
-            payload=request.payload,
-            task_id=request.task_id,
-        )
+            # Write to the Redis stream — this is what the worker consumes
+            self._streams.enqueue_task(
+                tier=tier,
+                task_type=request.task_type,
+                payload=request.payload,
+                task_id=request.task_id,
+            )
 
-        # Transition to DISPATCHED
-        record.status = TaskStatus.DISPATCHED
-        record.dispatched_at = time.time()
-        self._save(record)
-        logger.debug("Task %s dispatched to tier-%d stream", record.task_id, record.tier)
+            # Transition to DISPATCHED
+            record.status = TaskStatus.DISPATCHED
+            record.dispatched_at = time.time()
+            self._save(record)
+            logger.debug("Task %s dispatched to tier-%d stream", record.task_id, record.tier)
 
-        return record
+            _tasks_submitted.add(
+                1, {"tier": str(tier), "task_type": request.task_type}
+            )
+
+            return record
 
     # ------------------------------------------------------------------
     # 2. Record results (called when a worker publishes to aimesh:results)
@@ -163,6 +196,21 @@ class TaskRouter:
         record.result = result
         record.error = error
         self._save(record)
+
+        status_label = "failed" if error else "completed"
+        _tasks_completed.add(
+            1,
+            {
+                "tier": str(record.tier),
+                "task_type": record.task_type,
+                "status": status_label,
+            },
+        )
+        if record.duration is not None:
+            _task_duration.record(
+                record.duration,
+                {"tier": str(record.tier), "task_type": record.task_type},
+            )
 
         if error:
             logger.warning("Task %s FAILED on %r: %s", task_id, device_id, error)

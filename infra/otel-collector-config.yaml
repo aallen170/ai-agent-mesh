@@ -1,0 +1,57 @@
+# AIMESH OpenTelemetry Collector configuration
+#
+# Pipeline:
+#   Python app  --OTLP/gRPC-->  Collector  --Prometheus exposition-->  Prometheus  -->  Grafana
+#
+# Receivers:   OTLP gRPC (4317) and HTTP (4318) — accept traces and metrics from AIMESH processes
+# Processors:  batch — reduces export round-trips
+# Exporters:
+#   prometheus  — exposes /metrics on port 8889 for Prometheus to scrape
+#   debug       — logs a summary to stdout (helpful during development)
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 5s
+    send_batch_size: 1024
+
+  # Add a resource attribute so Grafana panels can filter by service
+  resource:
+    attributes:
+      - action: insert
+        key: deployment.environment
+        value: local
+
+exporters:
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    namespace: aimesh
+    send_timestamps: true
+    metric_expiration: 3m
+
+  debug:
+    verbosity: basic
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug]
+
+    metrics:
+      receivers: [otlp]
+      processors: [batch, resource]
+      exporters: [prometheus, debug]
