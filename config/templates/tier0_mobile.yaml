@@ -1,0 +1,99 @@
+# tier0_mobile.yaml — AIMESH device config template for Tier 0 mobile devices
+#
+# Tier 0 covers phones and tablets running on-device inference:
+#   iOS / iPadOS  → mlx_lm (Apple Silicon, unified memory)
+#   Android       → MLC-LLM (arm64, limited RAM)
+#
+# Prerequisites on the device
+# ----------------------------
+# iOS / iPadOS:
+#   pip install mlx-lm
+#   mlx_lm.server --model mlx-community/Llama-3.2-3B-Instruct-4bit --port 8080
+#
+# Android (MLC-LLM REST server):
+#   Follow https://llm.mlc.ai/docs/deploy/rest.html
+#   Ensure the REST server listens on 0.0.0.0:8080
+#
+# The control-plane LiteLLM gateway proxies to this device via the
+# model names registered in infra/litellm_config.yaml (tier0/*).
+# The device does NOT need to reach LiteLLM directly; only the
+# control-plane calls the device's inference server.
+#
+# Usage
+# -----
+#   1. Copy this file to your device (or to the mesh repo under config/).
+#   2. Fill in every line marked TODO.
+#   3. Start the worker:
+#        python scripts/run_worker.py --config config/ipad1.yaml
+#
+# Environment variable overrides:
+#   REDIS_URL          — overrides redis_url below
+#   LITELLM_BASE_URL   — overrides litellm_url below
+#   LITELLM_MASTER_KEY — auth key for the gateway (default: sk-aimesh-local)
+
+# ---------------------------------------------------------------------------
+# Identity
+# ---------------------------------------------------------------------------
+
+# TODO: set a unique slug for this device, e.g. ipad-1, ipad-2, iphone, android-tablet
+device_id: ipad-1
+
+# TODO: human-readable label shown in the registry and Grafana.
+name: "iPad #1"
+
+# ---------------------------------------------------------------------------
+# Tier
+# ---------------------------------------------------------------------------
+# Fixed at 0 for all mobile / edge devices.
+tier: 0
+
+# ---------------------------------------------------------------------------
+# Connections
+# ---------------------------------------------------------------------------
+
+# TODO: replace with the desktop PC's IP or mDNS hostname running Redis.
+redis_url: redis://desktop.local:6379/0
+
+# TODO: replace with the desktop PC's IP or mDNS hostname running LiteLLM.
+litellm_url: http://desktop.local:4000/v1
+
+# ---------------------------------------------------------------------------
+# Models
+# ---------------------------------------------------------------------------
+# List the LiteLLM model name(s) registered for this specific device in
+# infra/litellm_config.yaml.  Only models whose api_base points to THIS
+# device should appear here.
+#
+# Available Tier 0 model names (one per device in litellm_config.yaml):
+#   tier0/llama3.2-3b-ipad1       ← iPad #1
+#   tier0/llama3.2-3b-ipad2       ← iPad #2
+#   tier0/llama3.2-3b-iphone      ← iPhone
+#   tier0/llama3.2-3b-android     ← Android tablet
+#
+# TODO: uncomment the line that matches this device.
+models:
+  - tier0/llama3.2-3b-ipad1
+  # - tier0/llama3.2-3b-ipad2
+  # - tier0/llama3.2-3b-iphone
+  # - tier0/llama3.2-3b-android
+
+# ---------------------------------------------------------------------------
+# Heartbeat
+# ---------------------------------------------------------------------------
+# Mobile devices may sleep or lose connectivity; a shorter interval catches
+# dropouts faster.  Increase if battery life is a concern.
+heartbeat_interval: 15.0
+
+# ---------------------------------------------------------------------------
+# Hardware
+# ---------------------------------------------------------------------------
+# Used for registry metadata and Grafana dashboards only.
+# Tier 0 devices use unified memory — set vram_gb to 0.
+#
+# TODO: fill in the actual hardware specs.
+hardware:
+  ram_gb: 8.0         # unified memory (Apple Silicon) or total RAM (Android)
+  vram_gb: 0.0        # no discrete GPU on mobile
+  gpu_name: "Apple M-series (unified)"   # TODO: e.g. "Apple M2", "Qualcomm Adreno 740"
+  cpu_cores: 8        # TODO: actual core count
+  os: "iPadOS 17"     # TODO: e.g. "iPadOS 17.4", "Android 14"

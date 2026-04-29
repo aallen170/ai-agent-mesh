@@ -1,0 +1,89 @@
+# tier1_igpu_laptop.yaml — AIMESH device config template for Tier 1 (iGPU laptop)
+#
+# Tier 1 covers laptops with integrated graphics running Ollama.
+# Inference is CPU/iGPU-bound; expect slower throughput than Tier 2 dGPU devices.
+# Good for smaller models (≤ 8B parameters).
+#
+# Prerequisites on the device
+# ----------------------------
+#   brew install ollama          # macOS
+#   # or: curl -fsSL https://ollama.com/install.sh | sh   (Linux)
+#
+#   ollama pull llama3.1:8b     # ~4.7 GB — primary model for Tier 1
+#   ollama serve                # starts Ollama on port 11434
+#
+# The Ollama instance must be reachable from the control-plane desktop.
+# On macOS: System Preferences → Sharing → ensure the firewall allows port 11434,
+#           or set OLLAMA_HOST=0.0.0.0 before running ollama serve.
+#
+# Usage
+# -----
+#   1. Copy this file to the device (or to the mesh repo under config/).
+#   2. Fill in every line marked TODO.
+#   3. Start the worker:
+#        python scripts/run_worker.py --config config/general_laptop.yaml
+#
+# Environment variable overrides:
+#   REDIS_URL          — overrides redis_url below
+#   LITELLM_BASE_URL   — overrides litellm_url below
+#   LITELLM_MASTER_KEY — auth key for the gateway (default: sk-aimesh-local)
+
+# ---------------------------------------------------------------------------
+# Identity
+# ---------------------------------------------------------------------------
+
+# TODO: set a unique slug for this device, e.g. general-laptop
+device_id: general-laptop
+
+# TODO: human-readable label shown in the registry and Grafana.
+name: "General Laptop (iGPU)"
+
+# ---------------------------------------------------------------------------
+# Tier
+# ---------------------------------------------------------------------------
+# Fixed at 1 for iGPU laptops.
+tier: 1
+
+# ---------------------------------------------------------------------------
+# Connections
+# ---------------------------------------------------------------------------
+
+# TODO: replace with the desktop PC's IP or mDNS hostname running Redis.
+redis_url: redis://desktop.local:6379/0
+
+# TODO: replace with the desktop PC's IP or mDNS hostname running LiteLLM.
+litellm_url: http://desktop.local:4000/v1
+
+# ---------------------------------------------------------------------------
+# Models
+# ---------------------------------------------------------------------------
+# List the LiteLLM model name(s) registered for this device in
+# infra/litellm_config.yaml.  Only models whose api_base points to THIS
+# device should appear here.
+#
+# Available Tier 1 model names (from litellm_config.yaml):
+#   tier1/llama3.1-8b    — primary; fast enough on integrated graphics
+#
+# If you pull additional models on this device, add them to litellm_config.yaml
+# first, then list the new model_name here.
+models:
+  - tier1/llama3.1-8b
+
+# ---------------------------------------------------------------------------
+# Heartbeat
+# ---------------------------------------------------------------------------
+heartbeat_interval: 10.0
+
+# ---------------------------------------------------------------------------
+# Hardware
+# ---------------------------------------------------------------------------
+# Used for registry metadata and Grafana dashboards only.
+# iGPU devices share system RAM for GPU memory — set vram_gb to 0.
+#
+# TODO: fill in the actual hardware specs.
+hardware:
+  ram_gb: 16.0        # TODO: actual total system RAM
+  vram_gb: 0.0        # iGPU shares system RAM — no discrete VRAM
+  gpu_name: "Intel Iris Xe"   # TODO: e.g. "Intel Iris Xe", "AMD Radeon 680M", "Apple M2 GPU"
+  cpu_cores: 8        # TODO: actual logical core count
+  os: "macOS 14"      # TODO: e.g. "macOS 14.4", "Ubuntu 24.04", "Windows 11"

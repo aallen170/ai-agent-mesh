@@ -1,0 +1,89 @@
+# tier2_dgpu_laptop.yaml — AIMESH device config template for Tier 2 (gaming laptop, dGPU)
+#
+# Tier 2 covers discrete-GPU laptops and desktops running Ollama.
+# The gaming laptop is a pure worker node — it does NOT run control-plane
+# services (Redis, LiteLLM, etc.).  Those run on the desktop PC.
+#
+# This template is for the GAMING LAPTOP specifically. For the desktop PC,
+# use config/templates/tier2_dgpu_desktop.yaml.
+#
+# Prerequisites on the device
+# ----------------------------
+#   # Install Ollama (Windows):
+#   winget install Ollama.Ollama
+#   # or download from https://ollama.com/download
+#
+#   ollama pull mixtral:8x7b   # primary model (~26 GB, needs ≥ 12 GB VRAM)
+#   ollama serve               # starts on 127.0.0.1:11434 by default
+#
+# Ollama must bind to 0.0.0.0 so LiteLLM (on the desktop) can reach it.
+#   Windows PowerShell: $env:OLLAMA_HOST = "0.0.0.0"; ollama serve
+#   Linux:              OLLAMA_HOST=0.0.0.0 ollama serve
+#
+# Usage
+# -----
+#   1. Copy this file to the device (or to the mesh repo under config/).
+#   2. Fill in every line marked TODO.
+#   3. Start the worker:
+#        python scripts/run_worker.py --config config/gaming_laptop.yaml
+#
+# Environment variable overrides:
+#   REDIS_URL          — overrides redis_url below
+#   LITELLM_BASE_URL   — overrides litellm_url below
+#   LITELLM_MASTER_KEY — auth key for the gateway (default: sk-aimesh-local)
+
+# ---------------------------------------------------------------------------
+# Identity
+# ---------------------------------------------------------------------------
+
+# TODO: set a unique slug for this device, e.g. gaming-laptop
+device_id: gaming-laptop
+
+# TODO: human-readable label shown in the registry and Grafana.
+name: "Gaming Laptop (dGPU)"
+
+# ---------------------------------------------------------------------------
+# Tier
+# ---------------------------------------------------------------------------
+# Fixed at 2 for dGPU devices.
+tier: 2
+
+# ---------------------------------------------------------------------------
+# Connections
+# ---------------------------------------------------------------------------
+
+# TODO: replace with the desktop PC's IP or mDNS hostname running Redis.
+redis_url: redis://desktop.local:6379/0
+
+# TODO: replace with the desktop PC's IP or mDNS hostname running LiteLLM.
+litellm_url: http://desktop.local:4000/v1
+
+# ---------------------------------------------------------------------------
+# Models
+# ---------------------------------------------------------------------------
+# List the LiteLLM model name(s) registered for the GAMING LAPTOP in
+# infra/litellm_config.yaml.
+#
+# Gaming laptop Tier 2 model names (from litellm_config.yaml):
+#   tier2/mixtral-8x7b-laptop   — mixture-of-experts, good quality/speed tradeoff
+#
+# If you pull additional models on this device, add them to litellm_config.yaml
+# first (pointing api_base at this laptop's hostname), then list them here.
+models:
+  - tier2/mixtral-8x7b-laptop
+
+# ---------------------------------------------------------------------------
+# Heartbeat
+# ---------------------------------------------------------------------------
+heartbeat_interval: 10.0
+
+# ---------------------------------------------------------------------------
+# Hardware
+# ---------------------------------------------------------------------------
+# TODO: fill in the actual hardware specs.
+hardware:
+  ram_gb: 32.0          # TODO: actual system RAM
+  vram_gb: 12.0         # TODO: actual GPU VRAM (e.g. 8.0, 12.0, 16.0)
+  gpu_name: "NVIDIA RTX 3080"   # TODO: e.g. "NVIDIA RTX 4070", "AMD RX 6800M"
+  cpu_cores: 16         # TODO: actual logical core count
+  os: "Windows 11"      # TODO: e.g. "Windows 11", "Ubuntu 24.04"

@@ -1,0 +1,94 @@
+# tier2_dgpu_desktop.yaml — AIMESH device config template for Tier 2 (desktop PC, dGPU)
+#
+# Tier 2 covers discrete-GPU desktops and laptops running Ollama.
+# The desktop PC also hosts the control-plane services (Redis, LiteLLM,
+# Prometheus, Grafana) via docker compose, in addition to running a worker.
+#
+# This template is for the DESKTOP PC specifically. For the gaming laptop,
+# use config/templates/tier2_dgpu_laptop.yaml.
+#
+# Prerequisites on the device
+# ----------------------------
+#   # Install Ollama (Windows):
+#   winget install Ollama.Ollama
+#   # or download from https://ollama.com/download
+#
+#   ollama pull llama3.2:3b    # classifier model — small, fast (~2 GB)
+#   ollama pull llama3.1:70b   # primary large model (~40 GB, needs ≥ 24 GB VRAM)
+#   ollama serve               # starts on 127.0.0.1:11434 by default
+#
+# Ollama must bind to 0.0.0.0 so LiteLLM (in Docker) can reach it.
+# Set the environment variable before starting Ollama:
+#   Windows PowerShell: $env:OLLAMA_HOST = "0.0.0.0"; ollama serve
+#   Linux:              OLLAMA_HOST=0.0.0.0 ollama serve
+#
+# Usage
+# -----
+#   1. Copy this file to the device (or to the mesh repo under config/).
+#   2. Fill in every line marked TODO.
+#   3. Start the worker (after docker compose up for the control plane):
+#        python scripts/run_worker.py --config config/desktop_pc.yaml
+#
+# Environment variable overrides:
+#   REDIS_URL          — overrides redis_url below
+#   LITELLM_BASE_URL   — overrides litellm_url below
+#   LITELLM_MASTER_KEY — auth key for the gateway (default: sk-aimesh-local)
+
+# ---------------------------------------------------------------------------
+# Identity
+# ---------------------------------------------------------------------------
+
+# TODO: set a unique slug for this device, e.g. desktop-pc
+device_id: desktop-pc
+
+# TODO: human-readable label shown in the registry and Grafana.
+name: "Desktop PC (dGPU)"
+
+# ---------------------------------------------------------------------------
+# Tier
+# ---------------------------------------------------------------------------
+# Fixed at 2 for dGPU devices.
+tier: 2
+
+# ---------------------------------------------------------------------------
+# Connections
+# ---------------------------------------------------------------------------
+
+# The desktop PC hosts Redis locally, so localhost is correct here.
+# If running the worker as a Docker container, use the service name instead.
+redis_url: redis://localhost:6379/0
+
+# LiteLLM also runs locally on the desktop.
+litellm_url: http://localhost:4000/v1
+
+# ---------------------------------------------------------------------------
+# Models
+# ---------------------------------------------------------------------------
+# List the LiteLLM model name(s) registered for the DESKTOP in
+# infra/litellm_config.yaml.
+#
+# Desktop Tier 2 model names (from litellm_config.yaml):
+#   tier2/llama3.2-3b-desktop   — small classifier model (used by AIMESH-12)
+#   tier2/llama3.1-70b-desktop  — large primary model (requires ≥ 24 GB VRAM)
+#
+# The classifier model is always listed first so it is used as the default
+# when a task does not specify a model.
+models:
+  - tier2/llama3.2-3b-desktop
+  - tier2/llama3.1-70b-desktop
+
+# ---------------------------------------------------------------------------
+# Heartbeat
+# ---------------------------------------------------------------------------
+heartbeat_interval: 10.0
+
+# ---------------------------------------------------------------------------
+# Hardware
+# ---------------------------------------------------------------------------
+# TODO: fill in the actual hardware specs.
+hardware:
+  ram_gb: 64.0          # TODO: actual system RAM
+  vram_gb: 24.0         # TODO: actual GPU VRAM (e.g. 12.0, 16.0, 24.0)
+  gpu_name: "NVIDIA RTX 4090"   # TODO: e.g. "NVIDIA RTX 3090", "AMD RX 7900 XTX"
+  cpu_cores: 16         # TODO: actual logical core count
+  os: "Windows 11"      # TODO: e.g. "Windows 11", "Ubuntu 24.04"
