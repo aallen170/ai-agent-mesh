@@ -43,14 +43,31 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
+from opentelemetry import trace
+
 from ..control_plane.redis.client import RedisClient
 from ..control_plane.redis.pubsub import PubSubClient
 from ..control_plane.redis.streams import StreamsClient
 from ..control_plane.registry.device import Capabilities, DeviceInfo, DeviceStatus, Tier
 from ..control_plane.registry.registry import DeviceRegistry
+from ..telemetry import get_meter, get_tracer
 from .config import DeviceConfig
 
 logger = logging.getLogger(__name__)
+
+_tracer = get_tracer(__name__)
+_meter = get_meter(__name__)
+
+_worker_tasks = _meter.create_counter(
+    "aimesh.worker.tasks_processed",
+    unit="1",
+    description="Tasks processed by this worker agent",
+)
+_worker_duration = _meter.create_histogram(
+    "aimesh.worker.task_duration",
+    unit="s",
+    description="Time spent processing a single task on this worker in seconds",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -316,43 +333,74 @@ class BaseWorker(ABC):
         logger.info(
             "Task %s received (type=%s)", task.task_id, task.task_type
         )
-        start = time.time()
 
-        # Mark device as busy while processing
-        self._registry.heartbeat(self.config.device_id, status=DeviceStatus.BUSY)
+        with _tracer.start_as_current_span(
+            "aimesh.worker.process_task",
+            attributes={
+                "task.id": task.task_id,
+                "task.type": task.task_type,
+                "worker.device_id": self.config.device_id,
+                "worker.tier": self.config.tier,
+            },
+        ) as span:
+            start = time.time()
 
-        try:
-            result_envelope = self.process_task(task)
-        except Exception as exc:
-            logger.exception("Task %s raised an exception", task.task_id)
-            result_envelope = ResultEnvelope(
-                task_id=task.task_id,
-                result={},
-                error=f"{type(exc).__name__}: {exc}",
+            # Mark device as busy while processing
+            self._registry.heartbeat(self.config.device_id, status=DeviceStatus.BUSY)
+
+            try:
+                result_envelope = self.process_task(task)
+            except Exception as exc:
+                logger.exception("Task %s raised an exception", task.task_id)
+                span.record_exception(exc)
+                span.set_status(trace.StatusCode.ERROR, str(exc))
+                result_envelope = ResultEnvelope(
+                    task_id=task.task_id,
+                    result={},
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+
+            elapsed = time.time() - start
+            status_label = "completed" if result_envelope.success else "failed"
+            span.set_attributes({
+                "task.success": result_envelope.success,
+                "task.duration_s": elapsed,
+            })
+
+            _worker_tasks.add(
+                1,
+                {
+                    "device_id": self.config.device_id,
+                    "tier": str(self.config.tier),
+                    "status": status_label,
+                },
+            )
+            _worker_duration.record(
+                elapsed,
+                {"device_id": self.config.device_id, "tier": str(self.config.tier)},
             )
 
-        elapsed = time.time() - start
-        logger.info(
-            "Task %s finished in %.2fs (success=%s)",
-            task.task_id, elapsed, result_envelope.success,
-        )
-
-        try:
-            self._streams.publish_result(
-                task_id=result_envelope.task_id,
-                tier=self.config.tier,
-                device_id=self.config.device_id,
-                result=result_envelope.result,
-                error=result_envelope.error,
+            logger.info(
+                "Task %s finished in %.2fs (success=%s)",
+                task.task_id, elapsed, result_envelope.success,
             )
-        except Exception:
-            logger.exception("Failed to publish result for task %s", task.task_id)
 
-        # Always ACK — even on error — so the message doesn't get redelivered
-        try:
-            self._streams.ack_task(self.config.tier, task.msg_id)
-        except Exception:
-            logger.exception("Failed to ACK task %s (msg_id=%s)", task.task_id, task.msg_id)
+            try:
+                self._streams.publish_result(
+                    task_id=result_envelope.task_id,
+                    tier=self.config.tier,
+                    device_id=self.config.device_id,
+                    result=result_envelope.result,
+                    error=result_envelope.error,
+                )
+            except Exception:
+                logger.exception("Failed to publish result for task %s", task.task_id)
 
-        # Return to online status
-        self._registry.heartbeat(self.config.device_id, status=DeviceStatus.ONLINE)
+            # Always ACK — even on error — so the message doesn't get redelivered
+            try:
+                self._streams.ack_task(self.config.tier, task.msg_id)
+            except Exception:
+                logger.exception("Failed to ACK task %s (msg_id=%s)", task.task_id, task.msg_id)
+
+            # Return to online status
+            self._registry.heartbeat(self.config.device_id, status=DeviceStatus.ONLINE)
