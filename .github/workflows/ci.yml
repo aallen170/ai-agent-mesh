@@ -62,3 +62,9 @@ jobs:
         # Tests prompt building, JSON parsing, classifier fallback, and
         # auto-classify integration with TaskRouter. No live Redis or gateway required.
         run: python scripts/smoke_test_classifier.py
+
+      - name: Smoke test — Health check and heartbeat (AIMESH-17)
+        # Tests HealthReporter metrics, HTTP /health endpoint, DeviceConfig
+        # health_check_port field, and registry heartbeat metric storage.
+        # No live Redis or gateway required.
+        run: python scripts/smoke_test_health.py
