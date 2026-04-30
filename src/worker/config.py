@@ -55,6 +55,8 @@ class DeviceConfig:
     litellm_url         Base URL of the LiteLLM gateway (default: LITELLM_BASE_URL
                         env var, falling back to http://localhost:4000/v1).
     heartbeat_interval  Seconds between heartbeat publishes (default 10).
+    health_check_port   TCP port for the HTTP health check endpoint (default 8080).
+                        Set to 0 to disable the health server entirely.
     model_ids           Models available on this device (LiteLLM names,
                         e.g. ["tier2/llama3.1-70b-desktop"]).
     ram_gb              Total system RAM in gigabytes.
@@ -70,6 +72,7 @@ class DeviceConfig:
     redis_url: str = _DEFAULT_REDIS_URL
     litellm_url: str = _DEFAULT_LITELLM_URL
     heartbeat_interval: float = 10.0
+    health_check_port: int = 8080
     model_ids: list[str] = field(default_factory=list)
     ram_gb: float = 0.0
     vram_gb: float = 0.0
@@ -113,6 +116,7 @@ class DeviceConfig:
             redis_url=raw.get("redis_url", _DEFAULT_REDIS_URL),
             litellm_url=raw.get("litellm_url", _DEFAULT_LITELLM_URL),
             heartbeat_interval=float(raw.get("heartbeat_interval", 10.0)),
+            health_check_port=int(raw.get("health_check_port", 8080)),
             model_ids=models,
             ram_gb=float(hardware.get("ram_gb", 0)),
             vram_gb=float(hardware.get("vram_gb", 0)),
@@ -137,6 +141,7 @@ class DeviceConfig:
             f"redis_url: {self.redis_url}\n"
             f"litellm_url: {self.litellm_url}\n"
             f"heartbeat_interval: {self.heartbeat_interval}\n"
+            f"health_check_port: {self.health_check_port}\n"
             f"\nmodels:\n"
             + "".join(f"  - {m}\n" for m in self.model_ids)
             + f"\nhardware:\n"

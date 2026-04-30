@@ -52,6 +52,7 @@ from ..control_plane.registry.device import Capabilities, DeviceInfo, DeviceStat
 from ..control_plane.registry.registry import DeviceRegistry
 from ..telemetry import get_meter, get_tracer
 from .config import DeviceConfig
+from .health import HealthReporter
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +161,8 @@ class BaseWorker(ABC):
         self._registry = DeviceRegistry(self._redis, self._pubsub)
         self._stop_event = threading.Event()
         self._heartbeat_thread: threading.Thread | None = None
+        self._health = HealthReporter()
+        self._current_status: str = DeviceStatus.OFFLINE  # updated as state changes
 
     # ------------------------------------------------------------------
     # Abstract interface — subclasses implement this
@@ -236,6 +239,16 @@ class BaseWorker(ABC):
 
         device_info = self.build_device_info()
         self._registry.register(device_info)
+        self._current_status = DeviceStatus.ONLINE
+
+        # Start HTTP health endpoint (skipped if health_check_port == 0)
+        if self.config.health_check_port:
+            self._health.start_server(
+                port=self.config.health_check_port,
+                device_id=self.config.device_id,
+                tier=self.config.tier,
+                status_fn=lambda: self._current_status,
+            )
 
         self._heartbeat_thread = threading.Thread(
             target=self._heartbeat_loop,
@@ -248,9 +261,11 @@ class BaseWorker(ABC):
             self._consume_loop()
         finally:
             self._stop_event.set()
+            self._current_status = DeviceStatus.OFFLINE
             self._registry.deregister(self.config.device_id)
             if self._heartbeat_thread:
                 self._heartbeat_thread.join(timeout=5)
+            self._health.stop_server()
             self._redis.close()
             logger.info("Worker %r stopped cleanly", self.config.device_id)
 
@@ -277,8 +292,11 @@ class BaseWorker(ABC):
         )
         while not self._stop_event.wait(timeout=self.config.heartbeat_interval):
             try:
+                metrics = self._health.get_metrics()
                 known = self._registry.heartbeat(
-                    self.config.device_id, status=DeviceStatus.ONLINE
+                    self.config.device_id,
+                    status=self._current_status,
+                    metrics=metrics or None,
                 )
                 if not known:
                     logger.warning(
@@ -346,6 +364,7 @@ class BaseWorker(ABC):
             start = time.time()
 
             # Mark device as busy while processing
+            self._current_status = DeviceStatus.BUSY
             self._registry.heartbeat(self.config.device_id, status=DeviceStatus.BUSY)
 
             try:
@@ -403,4 +422,5 @@ class BaseWorker(ABC):
                 logger.exception("Failed to ACK task %s (msg_id=%s)", task.task_id, task.msg_id)
 
             # Return to online status
+            self._current_status = DeviceStatus.ONLINE
             self._registry.heartbeat(self.config.device_id, status=DeviceStatus.ONLINE)
