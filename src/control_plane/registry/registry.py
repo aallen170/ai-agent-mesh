@@ -104,13 +104,30 @@ class DeviceRegistry:
     # 2. Heartbeat
     # ------------------------------------------------------------------
 
-    def heartbeat(self, device_id: str, status: str = DeviceStatus.ONLINE) -> bool:
+    def heartbeat(
+        self,
+        device_id: str,
+        status: str = DeviceStatus.ONLINE,
+        metrics: dict | None = None,
+    ) -> bool:
         """
         Record a heartbeat from a device.
 
-        Updates last_seen and status in Redis.  Returns True if the device
-        was known, False if it was unrecognised (caller should trigger a
-        full re-registration).
+        Updates ``last_seen`` and ``status`` in Redis.  If *metrics* is
+        provided each key is stored with a ``metric_`` prefix so live system
+        data (cpu_pct, mem_pct, etc.) is available alongside static capability
+        fields without polluting the DeviceInfo schema.
+
+        Returns True if the device was known, False if it was unrecognised
+        (caller should trigger a full re-registration).
+
+        Parameters
+        ----------
+        device_id   The device sending the heartbeat.
+        status      New status string ("online" / "busy" / "offline").
+        metrics     Optional dict of live metrics from HealthReporter.get_metrics().
+                    Keys are stored as ``metric_<key>`` in the device hash.
+                    Pass None (or omit) when psutil is unavailable.
         """
         key = _DEVICE_KEY.format(device_id=device_id)
 
@@ -122,9 +139,17 @@ class DeviceRegistry:
         pipe = self._r.pipeline()
         pipe.hset(key, "last_seen", str(time.time()))
         pipe.hset(key, "status", status)
+
+        if metrics:
+            for k, v in metrics.items():
+                pipe.hset(key, f"metric_{k}", str(v))
+
         pipe.execute()
 
-        logger.debug("Heartbeat from %r (status=%s)", device_id, status)
+        logger.debug(
+            "Heartbeat from %r (status=%s, metrics=%s)",
+            device_id, status, list(metrics.keys()) if metrics else None,
+        )
         return True
 
     # ------------------------------------------------------------------
