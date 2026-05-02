@@ -4,6 +4,7 @@ contract.py — The formal interface between the AIMESH control plane and worker
 This module defines:
 
   TaskEnvelope    The shape of a task as a worker receives it from the Redis stream.
+  ResultMetadata  Optional metadata a worker can attach to a result (timing, model, tokens).
   ResultEnvelope  The shape of a result a worker must return after processing.
   BaseWorker      Abstract base class that every device-specific worker extends.
 
@@ -28,7 +29,11 @@ Example
         def process_task(self, task: TaskEnvelope) -> ResultEnvelope:
             prompt = task.payload.get("prompt", "")
             response = ollama.chat(model=task.payload["model"], messages=[...])
-            return ResultEnvelope(task_id=task.task_id, result={"text": response})
+            return ResultEnvelope(
+                task_id=task.task_id,
+                result={"text": response},
+                metadata=ResultMetadata(model_id="llama3:8b", output_tokens=128),
+            )
 
     if __name__ == "__main__":
         config = DeviceConfig.from_yaml("device_config.yaml")
@@ -97,6 +102,54 @@ class TaskEnvelope:
 
 
 @dataclass
+class ResultMetadata:
+    """
+    Optional execution metadata a worker attaches to a ResultEnvelope.
+
+    Workers should populate as many fields as their backend supports.
+    All fields are optional — omit what is unavailable rather than guessing.
+
+    Fields
+    ------
+    execution_time_s    Wall-clock seconds the worker spent on the task
+                        (excludes queue wait time; measured by BaseWorker).
+    model_id            The specific model that processed the task
+                        (e.g. "llama3:8b", "claude-sonnet-4-6").
+    input_tokens        Number of tokens in the prompt/input, if known.
+    output_tokens       Number of tokens generated, if known.
+    partial             True if the result is incomplete — e.g. generation
+                        was cut short by a timeout or context limit.
+                        The control plane will not retry partial results.
+    """
+    execution_time_s: float | None = None
+    model_id: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    partial: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a plain dict (for JSON embedding in Redis streams)."""
+        return {
+            "execution_time_s": self.execution_time_s,
+            "model_id": self.model_id,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "partial": self.partial,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "ResultMetadata":
+        """Reconstruct from a deserialized dict."""
+        return cls(
+            execution_time_s=d.get("execution_time_s"),
+            model_id=d.get("model_id"),
+            input_tokens=d.get("input_tokens"),
+            output_tokens=d.get("output_tokens"),
+            partial=bool(d.get("partial", False)),
+        )
+
+
+@dataclass
 class ResultEnvelope:
     """
     The result a worker returns after processing a TaskEnvelope.
@@ -108,10 +161,14 @@ class ResultEnvelope:
               Use an empty dict if there is no meaningful output.
     error     Human-readable error message if processing failed.
               Leave as None for success.
+    metadata  Optional ResultMetadata — execution time, model, token counts, etc.
+              BaseWorker automatically sets execution_time_s; workers should
+              populate model_id, input_tokens, output_tokens where available.
     """
     task_id: str
     result: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
+    metadata: ResultMetadata | None = None
 
     @property
     def success(self) -> bool:
@@ -162,7 +219,7 @@ class BaseWorker(ABC):
         self._stop_event = threading.Event()
         self._heartbeat_thread: threading.Thread | None = None
         self._health = HealthReporter()
-        self._current_status: str = DeviceStatus.OFFLINE  # updated as state changes
+        self._current_status: str = DeviceStatus.OFFLINE
 
     # ------------------------------------------------------------------
     # Abstract interface — subclasses implement this
@@ -186,6 +243,8 @@ class BaseWorker(ABC):
         ResultEnvelope with task_id matching task.task_id.
         Set ResultEnvelope.error to a string on failure rather than raising
         if you want more control over the error message.
+        Populate ResultEnvelope.metadata with model_id, token counts, etc.
+        where available — BaseWorker fills in execution_time_s automatically.
         """
         ...
 
@@ -234,14 +293,12 @@ class BaseWorker(ABC):
             self.config.device_id, self.config.tier, self.config.model_ids,
         )
 
-        # Bootstrap streams in case control plane hasn't started yet
         self._streams.ensure_streams()
 
         device_info = self.build_device_info()
         self._registry.register(device_info)
         self._current_status = DeviceStatus.ONLINE
 
-        # Start HTTP health endpoint (skipped if health_check_port == 0)
         if self.config.health_check_port:
             self._health.start_server(
                 port=self.config.health_check_port,
@@ -270,10 +327,7 @@ class BaseWorker(ABC):
             logger.info("Worker %r stopped cleanly", self.config.device_id)
 
     def stop(self) -> None:
-        """
-        Signal the worker to stop after the current task finishes.
-        The run() call will return within one consume-loop iteration.
-        """
+        """Signal the worker to stop after the current task finishes."""
         logger.info("Stop requested for worker %r", self.config.device_id)
         self._stop_event.set()
 
@@ -284,8 +338,8 @@ class BaseWorker(ABC):
     def _heartbeat_loop(self) -> None:
         """
         Runs in a daemon thread.  Sends a heartbeat to the registry every
-        heartbeat_interval seconds.  If the control plane has lost our
-        record (e.g. it restarted), re-registers automatically.
+        heartbeat_interval seconds.  Re-registers if the control plane
+        has lost our record (e.g. after a restart).
         """
         logger.debug(
             "Heartbeat loop started (interval=%.1fs)", self.config.heartbeat_interval
@@ -346,11 +400,10 @@ class BaseWorker(ABC):
         Process a single task: call process_task(), publish result, ACK.
 
         Exceptions from process_task() are caught and turned into error
-        results so the worker loop keeps running.
+        results so the worker loop keeps running.  BaseWorker automatically
+        stamps execution_time_s on the result metadata.
         """
-        logger.info(
-            "Task %s received (type=%s)", task.task_id, task.task_type
-        )
+        logger.info("Task %s received (type=%s)", task.task_id, task.task_type)
 
         with _tracer.start_as_current_span(
             "aimesh.worker.process_task",
@@ -363,7 +416,6 @@ class BaseWorker(ABC):
         ) as span:
             start = time.time()
 
-            # Mark device as busy while processing
             self._current_status = DeviceStatus.BUSY
             self._registry.heartbeat(self.config.device_id, status=DeviceStatus.BUSY)
 
@@ -380,6 +432,13 @@ class BaseWorker(ABC):
                 )
 
             elapsed = time.time() - start
+
+            # Stamp execution_time_s — BaseWorker is authoritative for timing;
+            # subclasses fill in model_id, tokens, etc.
+            if result_envelope.metadata is None:
+                result_envelope.metadata = ResultMetadata()
+            result_envelope.metadata.execution_time_s = elapsed
+
             status_label = "completed" if result_envelope.success else "failed"
             span.set_attributes({
                 "task.success": result_envelope.success,
@@ -411,16 +470,18 @@ class BaseWorker(ABC):
                     device_id=self.config.device_id,
                     result=result_envelope.result,
                     error=result_envelope.error,
+                    metadata=result_envelope.metadata,
                 )
             except Exception:
                 logger.exception("Failed to publish result for task %s", task.task_id)
 
-            # Always ACK — even on error — so the message doesn't get redelivered
+            # Always ACK — even on error — so the message is not redelivered
             try:
                 self._streams.ack_task(self.config.tier, task.msg_id)
             except Exception:
-                logger.exception("Failed to ACK task %s (msg_id=%s)", task.task_id, task.msg_id)
+                logger.exception(
+                    "Failed to ACK task %s (msg_id=%s)", task.task_id, task.msg_id
+                )
 
-            # Return to online status
             self._current_status = DeviceStatus.ONLINE
             self._registry.heartbeat(self.config.device_id, status=DeviceStatus.ONLINE)
