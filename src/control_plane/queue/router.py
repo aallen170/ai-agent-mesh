@@ -134,6 +134,8 @@ class TaskRouter:
                 tier=tier,
                 status=TaskStatus.PENDING,
                 enqueued_at=time.time(),
+                payload=request.payload,
+                max_retries=request.max_retries,
             )
 
             # Persist the PENDING record first so the task is visible immediately
@@ -173,15 +175,18 @@ class TaskRouter:
         device_id: str,
         result: dict,
         error: str | None = None,
+        metadata: dict | None = None,
     ) -> Optional[TaskRecord]:
         """
         Update a task's record when its result arrives from the results stream.
 
-        Sets status to COMPLETED or FAILED depending on whether *error* is set.
-        Returns the updated TaskRecord, or None if the task_id is unknown.
+        On success: sets status → COMPLETED, stores result and metadata.
+        On error:
+          - If retries remain: re-dispatches the task (status stays DISPATCHED)
+            and increments retry_count.
+          - If retries exhausted: sets status → FAILED and writes to DLQ.
 
-        This is called by whatever component reads the ``aimesh:results``
-        stream (e.g. the LangGraph orchestrator or a control-plane loop).
+        Returns the updated TaskRecord, or None if the task_id is unknown.
         """
         record = self.get_task(task_id)
         if record is None:
@@ -190,35 +195,70 @@ class TaskRouter:
             )
             return None
 
-        record.status = TaskStatus.FAILED if error else TaskStatus.COMPLETED
-        record.completed_at = time.time()
         record.device_id = device_id
-        record.result = result
-        record.error = error
-        self._save(record)
+        record.result_metadata = metadata
 
-        status_label = "failed" if error else "completed"
-        _tasks_completed.add(
-            1,
-            {
-                "tier": str(record.tier),
-                "task_type": record.task_type,
-                "status": status_label,
-            },
-        )
-        if record.duration is not None:
-            _task_duration.record(
-                record.duration,
-                {"tier": str(record.tier), "task_type": record.task_type},
+        if not error:
+            # ── Success path ──
+            record.status = TaskStatus.COMPLETED
+            record.completed_at = time.time()
+            record.result = result
+            record.error = None
+            self._save(record)
+
+            _tasks_completed.add(
+                1,
+                {"tier": str(record.tier), "task_type": record.task_type, "status": "completed"},
             )
-
-        if error:
-            logger.warning("Task %s FAILED on %r: %s", task_id, device_id, error)
-        else:
+            if record.duration is not None:
+                _task_duration.record(
+                    record.duration,
+                    {"tier": str(record.tier), "task_type": record.task_type},
+                )
             logger.info(
                 "Task %s COMPLETED on %r (%.2fs)",
                 task_id, device_id, record.duration or 0,
             )
+        else:
+            # ── Error path ──
+            record.error = error
+            if not record.retries_exhausted:
+                # Auto-retry: re-enqueue on the same tier
+                record.retry_count += 1
+                record.status = TaskStatus.DISPATCHED
+                record.dispatched_at = time.time()
+                self._save(record)
+                self._streams.enqueue_task(
+                    tier=record.tier,
+                    task_type=record.task_type,
+                    payload=record.payload,
+                    task_id=record.task_id,
+                )
+                logger.warning(
+                    "Task %s FAILED on %r (retry %d/%d): %s",
+                    task_id, device_id, record.retry_count, record.max_retries, error,
+                )
+            else:
+                # Retries exhausted → FAILED + DLQ
+                record.status = TaskStatus.FAILED
+                record.completed_at = time.time()
+                self._save(record)
+                self._streams.enqueue_dlq(
+                    task_id=record.task_id,
+                    task_type=record.task_type,
+                    tier=record.tier,
+                    error=error,
+                    retry_count=record.retry_count,
+                )
+                _tasks_completed.add(
+                    1,
+                    {"tier": str(record.tier), "task_type": record.task_type, "status": "failed"},
+                )
+                logger.error(
+                    "Task %s permanently FAILED after %d retries — moved to DLQ: %s",
+                    task_id, record.retry_count, error,
+                )
+
         return record
 
     def process_results_stream(self, consumer_name: str = "control-plane") -> int:
@@ -227,9 +267,8 @@ class TaskRouter:
 
         Returns the number of results processed.
 
-        Call this in a loop (or from the LangGraph orchestrator) to keep
-        task records up to date.  Each result is ACKed after the record
-        is saved.
+        Call this in a loop (or via ResultCollector) to keep task records
+        up to date.  Each result is ACKed after the record is saved.
         """
         raw_results = self._streams.read_results(
             consumer_name=consumer_name,
@@ -243,10 +282,84 @@ class TaskRouter:
                 device_id=raw["device_id"],
                 result=raw["result"],
                 error=raw["error"],
+                metadata=raw.get("metadata"),
             )
             self._streams.ack_result(raw["_msg_id"])
             processed += 1
         return processed
+
+    # ------------------------------------------------------------------
+    # 2b. Retry and DLQ management
+    # ------------------------------------------------------------------
+
+    def retry_task(self, task_id: str) -> Optional[TaskRecord]:
+        """
+        Manually re-enqueue a FAILED or DLQ task, resetting its error state.
+
+        Use this to requeue a task from the DLQ after investigating the root
+        cause, or to force a retry without waiting for the automatic logic.
+
+        Returns the updated TaskRecord, or None if the task is not found or
+        is not in a failed/DLQ state.
+        """
+        record = self.get_task(task_id)
+        if record is None:
+            logger.warning("retry_task: unknown task %r", task_id)
+            return None
+        if record.status not in (TaskStatus.FAILED, TaskStatus.DLQ):
+            logger.warning(
+                "retry_task: task %r is %r (expected FAILED or DLQ) — ignoring",
+                task_id, record.status,
+            )
+            return None
+
+        record.status = TaskStatus.DISPATCHED
+        record.dispatched_at = time.time()
+        record.completed_at = None
+        record.error = None
+        record.retry_count += 1
+        self._save(record)
+
+        self._streams.enqueue_task(
+            tier=record.tier,
+            task_type=record.task_type,
+            payload=record.payload,
+            task_id=record.task_id,
+        )
+        logger.info("Task %s manually requeued (retry #%d)", task_id, record.retry_count)
+        return record
+
+    def list_dlq(self, count: int = 100) -> list[dict]:
+        """
+        Return entries currently in the DLQ stream (non-destructive).
+
+        Each entry is a dict with task_id, task_type, tier, error, retry_count,
+        and _msg_id.  The DLQ is an append-only audit log — use retry_task()
+        to re-process an entry.
+        """
+        return self._streams.read_dlq(count=count)
+
+    def dlq_length(self) -> int:
+        """Return the total number of entries in the DLQ."""
+        return self._streams.dlq_length()
+
+    def expire_completed_tasks(self, ttl_seconds: int = 86400) -> int:
+        """
+        Set a TTL on completed and DLQ task records in Redis to prevent
+        unbounded growth.  Tasks in PENDING or DISPATCHED state are not expired.
+
+        Returns the number of keys that had a TTL applied.
+        """
+        terminal_statuses = {TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.DLQ}
+        count = 0
+        for record in self.list_tasks():
+            if record.status in terminal_statuses:
+                key = _TASK_KEY.format(task_id=record.task_id)
+                self._r.expire(key, ttl_seconds)
+                count += 1
+        if count:
+            logger.debug("Applied %ds TTL to %d terminal task records", ttl_seconds, count)
+        return count
 
     # ------------------------------------------------------------------
     # 3. Queries
@@ -301,13 +414,14 @@ class TaskRouter:
 
         Example::
 
-            {"pending": 0, "dispatched": 2, "completed": 14, "failed": 1}
+            {"pending": 0, "dispatched": 2, "completed": 14, "failed": 1, "dlq": 0}
         """
         counts: dict[str, int] = {
             TaskStatus.PENDING: 0,
             TaskStatus.DISPATCHED: 0,
             TaskStatus.COMPLETED: 0,
             TaskStatus.FAILED: 0,
+            TaskStatus.DLQ: 0,
         }
         for record in self.list_tasks():
             if record.status in counts:

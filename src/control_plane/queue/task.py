@@ -7,8 +7,8 @@ TaskRecord      The full persisted record of a task, stored as a Redis hash.
 
 Redis key layout
 ----------------
-aimesh:task:{task_id}   Hash  — one per task (TaskRecord fields)
-aimesh:tasks:index      Set   — all known task_ids (for enumeration / GC)
+aimesh:task:{task_id}   Hash  -- one per task (TaskRecord fields)
+aimesh:tasks:index      Set   -- all known task_ids (for enumeration / GC)
 """
 from __future__ import annotations
 
@@ -23,17 +23,15 @@ class TaskStatus:
     """
     String constants for task lifecycle states.
 
-    Using plain string constants (rather than an Enum) so values survive
-    a Redis round-trip without any coercion — Redis stores everything as
-    bytes / strings.
-
-    Flow:  PENDING → DISPATCHED → COMPLETED
-                               → FAILED
+    Flow:  PENDING -> DISPATCHED -> COMPLETED
+                               -> FAILED -> (retry) -> DISPATCHED
+                                        -> DLQ      (retries exhausted)
     """
     PENDING = "pending"
-    DISPATCHED = "dispatched"   # Written to the tier stream, awaiting a worker
-    COMPLETED = "completed"     # Worker returned a successful result
-    FAILED = "failed"           # Worker returned an error, or timed out
+    DISPATCHED = "dispatched"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    DLQ = "dlq"
 
 
 @dataclass
@@ -43,40 +41,41 @@ class TaskRequest:
 
     Fields
     ------
-    task_type   Application-defined label for the kind of work
-                (e.g. "llm_inference", "embedding", "summarise").
+    task_type   Application-defined label for the kind of work.
     payload     Arbitrary dict passed through to the worker unchanged.
-    tier        Which compute tier should handle this task (0–4), or None to
-                let the TaskClassifier (AIMESH-12) auto-select the tier.
-                If no classifier is configured on the router, None falls back
-                to tier 2 (dGPU desktop).
-    task_id     Optional stable ID.  Auto-generated (UUID4) if not provided.
-                Pass an explicit ID to make re-submissions idempotent.
+    tier        Which compute tier should handle this task (0-4), or None to
+                let the TaskClassifier auto-select. Falls back to tier 2.
+    task_id     Optional stable ID. Auto-generated (UUID4) if not provided.
     """
     task_type: str
     payload: dict[str, Any]
     tier: int | None = None
     task_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    max_retries: int = 3
 
 
 @dataclass
 class TaskRecord:
     """
-    The full persisted record of a task.  Stored as a flat Redis hash so
+    The full persisted record of a task. Stored as a flat Redis hash so
     every field is a string; use to_dict() / from_dict() to convert.
 
     Fields
     ------
-    task_id         Globally unique identifier.
-    task_type       Mirrors TaskRequest.task_type.
-    tier            Target compute tier.
-    status          Current lifecycle state (see TaskStatus).
-    enqueued_at     Unix timestamp when the task was first submitted.
-    dispatched_at   Unix timestamp when the task was written to the stream.
-    completed_at    Unix timestamp when the result was received (or None).
-    device_id       ID of the worker that handled the task (set on completion).
-    result          Dict returned by the worker on success (or None).
-    error           Error string on failure (or None on success).
+    task_id             Globally unique identifier.
+    task_type           Mirrors TaskRequest.task_type.
+    tier                Target compute tier.
+    status              Current lifecycle state (see TaskStatus).
+    enqueued_at         Unix timestamp when the task was first submitted.
+    dispatched_at       Unix timestamp when the task was written to the stream.
+    completed_at        Unix timestamp when the result was received (or None).
+    device_id           ID of the worker that handled the task (set on completion).
+    result              Dict returned by the worker on success (or None).
+    error               Error string on failure (or None on success).
+    retry_count         Number of times this task has been retried so far.
+    max_retries         Maximum automatic retries before the task is sent to DLQ.
+    result_metadata     Dict of ResultMetadata fields from the worker.
+    payload             Original task payload stored for retry re-enqueue.
     """
     task_id: str
     task_type: str
@@ -88,9 +87,13 @@ class TaskRecord:
     device_id: str | None = None
     result: dict[str, Any] | None = None
     error: str | None = None
+    retry_count: int = 0
+    max_retries: int = 3
+    result_metadata: dict[str, Any] | None = None
+    payload: dict[str, Any] = field(default_factory=dict)
 
     # ------------------------------------------------------------------
-    # Redis serialisation — everything must be a string for HSET
+    # Redis serialisation
     # ------------------------------------------------------------------
 
     def to_dict(self) -> dict[str, str]:
@@ -106,6 +109,10 @@ class TaskRecord:
             "device_id": self.device_id or "",
             "result": json.dumps(self.result) if self.result is not None else "",
             "error": self.error or "",
+            "retry_count": str(self.retry_count),
+            "max_retries": str(self.max_retries),
+            "result_metadata": json.dumps(self.result_metadata) if self.result_metadata is not None else "",
+            "payload": json.dumps(self.payload),
         }
 
     @classmethod
@@ -131,6 +138,10 @@ class TaskRecord:
             device_id=_opt_str(d.get("device_id", "")),
             result=_opt_json(d.get("result", "")),
             error=_opt_str(d.get("error", "")),
+            retry_count=int(d.get("retry_count", 0)),
+            max_retries=int(d.get("max_retries", 3)),
+            result_metadata=_opt_json(d.get("result_metadata", "")),
+            payload=json.loads(d.get("payload", "{}")),
         )
 
     # ------------------------------------------------------------------
@@ -139,12 +150,17 @@ class TaskRecord:
 
     @property
     def is_terminal(self) -> bool:
-        """True if the task is in a final state (no further state changes expected)."""
-        return self.status in (TaskStatus.COMPLETED, TaskStatus.FAILED)
+        """True if the task is in a final state."""
+        return self.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.DLQ)
+
+    @property
+    def retries_exhausted(self) -> bool:
+        """True if this task has used all available retries."""
+        return self.retry_count >= self.max_retries
 
     @property
     def duration(self) -> float | None:
-        """Wall-clock seconds from enqueue to completion, or None if not yet done."""
+        """Wall-clock seconds from enqueue to completion, or None if not done."""
         if self.completed_at is None:
             return None
         return self.completed_at - self.enqueued_at
@@ -152,5 +168,6 @@ class TaskRecord:
     def __repr__(self) -> str:
         return (
             f"TaskRecord(id={self.task_id!r}, type={self.task_type!r}, "
-            f"tier={self.tier}, status={self.status!r})"
+            f"tier={self.tier}, status={self.status!r}, "
+            f"retries={self.retry_count}/{self.max_retries})"
         )

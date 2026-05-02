@@ -68,3 +68,11 @@ jobs:
         # health_check_port field, and registry heartbeat metric storage.
         # No live Redis or gateway required.
         run: python scripts/smoke_test_health.py
+
+      - name: Smoke test — Result serialization and error handling (AIMESH-18)
+        # Tests ResultMetadata round-trip, auto-retry on failure, DLQ promotion,
+        # manual retry_task(), ResultCollector background processing, and TTL expiry.
+        # Requires live Redis.
+        run: python scripts/smoke_test_results.py
+        env:
+          REDIS_URL: redis://localhost:6379/0

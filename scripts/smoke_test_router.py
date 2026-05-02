@@ -129,6 +129,7 @@ def main() -> None:
         task_type="llm_inference",
         payload={"prompt": "This one will fail.", "model": "llama3:70b"},
         tier=2,
+        max_retries=0,  # exhaust retries immediately so first error → FAILED
     )
     fail_record = router.submit(fail_request)
 
