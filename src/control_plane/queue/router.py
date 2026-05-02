@@ -135,6 +135,7 @@ class TaskRouter:
                 status=TaskStatus.PENDING,
                 enqueued_at=time.time(),
                 payload=request.payload,
+                max_retries=request.max_retries,
             )
 
             # Persist the PENDING record first so the task is visible immediately

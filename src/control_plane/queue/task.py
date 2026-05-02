@@ -51,6 +51,7 @@ class TaskRequest:
     payload: dict[str, Any]
     tier: int | None = None
     task_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    max_retries: int = 3
 
 
 @dataclass
